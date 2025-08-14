@@ -6,136 +6,84 @@ import threading
 import time
 import requests
 import httpx
-from threading import Thread
-from functools import wraps
+from threading import Thread  
 
 app = Flask(__name__)
 
-# ============ Configuration ============
-CONFIG = {
-    "JWT_GENERATOR_URL": "https://jwt-gen-api-v2.onrender.com/token",
-    "REMOVE_API": "https://amin-api-remove-add-jwt-token.onrender.com/remove_friend",
-    "ADD_API": "https://amin-api-remove-add-jwt-token.onrender.com/adding_friend",
-    "ADMIN_KEY": "amin_belara",  # Change this in production!
-    "STORAGE_FILE": 'uid_storage.json',
-    "TOKEN_REFRESH_INTERVAL": 8 * 3600,  # 8 hours
-    "CLEANUP_INTERVAL": 60  # 1 minute
-}
+####################################
+key2 = "amin_belara"
+jwt_token = None  
 
-# ============ JWT Token Management ============
-class TokenManager:
-    def __init__(self):
-        self.token = None
-        self.uid = "3935704624"
-        self.password = "4DD9580BC3E3E64BBAA1455E624E02DF230BCD68D36E16CB451CC4EA734B3DF0"
-    
-    def get_jwt_token(self):
-        try:
-            url = f"{CONFIG['JWT_GENERATOR_URL']}?uid={self.uid}&password={self.password}"
-            response = httpx.get(url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('status') == 'live':
-                    self.token = data['token']
-                    app.logger.info(f"[JWT] Token updated: {self.token[:15]}...")
-                    return True
-            app.logger.error(f"[JWT] Failed to get token: {response.text}")
-        except Exception as e:
-            app.logger.error(f"[JWT] Error: {str(e)}")
-        return False
-    
-    def start_token_refresh(self):
-        def refresh_loop():
-            while True:
-                self.get_jwt_token()
-                time.sleep(CONFIG['TOKEN_REFRESH_INTERVAL'])
-        
-        Thread(target=refresh_loop, daemon=True).start()
+REMOVE_API = "https://amin-api-remove-add-jwt-token.onrender.com/remove_friend"
+ADD_API = "https://amin-api-remove-add-jwt-token.onrender.com/adding_friend"
 
-token_manager = TokenManager()
+def get_jwt_token():
+    global jwt_token
+    url = "https://jwt-gen-api-v2.onrender.com/token?uid=3935704624&password=4DD9580BC3E3E64BBAA1455E624E02DF230BCD68D36E16CB451CC4EA734B3DF0"
+    try:
+        response = httpx.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('status') == 'live':
+                jwt_token = data['token']
+                print("[JWT] Token updated:", jwt_token)
+            else:
+                print("[JWT] Failed to get token:", data)
+        else:
+            print("[JWT] Status code error:", response.status_code)
+    except httpx.RequestError as e:
+        print(f"[JWT] Request error: {e}")
 
-# ============ UID Storage Management ============
-class UIDStorage:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.ensure_storage_file()
-    
-    def ensure_storage_file(self):
-        if not os.path.exists(CONFIG['STORAGE_FILE']):
-            with open(CONFIG['STORAGE_FILE'], 'w') as file:
-                json.dump({}, file)
-    
-    def load_uids(self):
-        self.ensure_storage_file()
-        with self.lock:
-            with open(CONFIG['STORAGE_FILE'], 'r') as file:
-                return json.load(file)
-    
-    def save_uids(self, uids):
-        self.ensure_storage_file()
-        with self.lock:
-            with open(CONFIG['STORAGE_FILE'], 'w') as file:
-                json.dump(uids, file, default=str)
-    
-    def cleanup_expired(self):
-        while True:
-            uids = self.load_uids()
+def token_updater():
+    while True:
+        get_jwt_token()
+        time.sleep(8 * 3600)
+
+token_thread = Thread(target=token_updater, daemon=True)
+token_thread.start()
+
+####################################
+STORAGE_FILE = 'uid_storage.json'
+storage_lock = threading.Lock()
+
+def ensure_storage_file():
+    if not os.path.exists(STORAGE_FILE):
+        with open(STORAGE_FILE, 'w') as file:
+            json.dump({}, file)
+
+def load_uids():
+    ensure_storage_file()
+    with open(STORAGE_FILE, 'r') as file:
+        return json.load(file)
+
+def save_uids(uids):
+    ensure_storage_file()
+    with open(STORAGE_FILE, 'w') as file:
+        json.dump(uids, file, default=str)
+
+def cleanup_expired_uids():
+    while True:
+        with storage_lock:
+            uids = load_uids()
             current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            expired = [
-                uid for uid, exp_time in uids.items() 
-                if exp_time != 'permanent' and exp_time <= current_time
-            ]
-            
-            for uid in expired:
-                self.remove_uid(uid, external=True)
-                app.logger.info(f"[CLEANUP] Removed expired UID: {uid}")
-            
-            time.sleep(CONFIG['CLEANUP_INTERVAL'])
-
-    def start_cleanup(self):
-        Thread(target=self.cleanup_expired, daemon=True).start()
-    
-    def remove_uid(self, uid, external=False):
-        uids = self.load_uids()
-        if uid in uids:
-            del uids[uid]
-            self.save_uids(uids)
-            
-            if external and token_manager.token:
+            expired_uids = [uid for uid, exp_time in uids.items() if exp_time != 'permanent' and exp_time <= current_time]
+            for uid in expired_uids:
                 try:
-                    url = f"{CONFIG['REMOVE_API']}?token={token_manager.token}&id={uid}&key={CONFIG['ADMIN_KEY']}"
-                    requests.get(url, timeout=5)
-                except Exception as e:
-                    app.logger.error(f"[EXTERNAL] Remove error: {str(e)}")
-            return True
-        return False
+                    if jwt_token:  
+                        requests.get(f"{REMOVE_API}?token={jwt_token}&id={uid}&key={key2}", timeout=5)
+                except:
+                    pass
+                del uids[uid]
+                print(f"[CLEANUP] Deleted expired UID: {uid}")
+            save_uids(uids)
+        time.sleep(1)
 
-storage = UIDStorage()
+cleanup_thread = threading.Thread(target=cleanup_expired_uids, daemon=True)
+cleanup_thread.start()
 
-# ============ API Endpoints ============
-def require_key(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        provided_key = request.args.get('key')
-        if provided_key != CONFIG['ADMIN_KEY']:
-            return jsonify({"error": "Invalid or missing API key"}), 403
-        return func(*args, **kwargs)
-    return wrapper
-
-@app.route('/')
-def home():
-    return jsonify({
-        "status": "running",
-        "endpoints": {
-            "add_uid": "/add_uid?uid=ID&time=VALUE&type=TYPE&key=API_KEY",
-            "remove_uid": "/remove?uid=ID&key=API_KEY",
-            "check_time": "/get_time/ID?key=API_KEY"
-        },
-        "documentation": "See README for full API docs"
-    })
-
+####################################
+# إضافة UID
 @app.route('/add_uid', methods=['GET'])
-@require_key
 def add_uid():
     uid = request.args.get('uid')
     time_value = request.args.get('time')
@@ -143,106 +91,118 @@ def add_uid():
     permanent = request.args.get('permanent', 'false').lower() == 'true'
 
     if not uid:
-        return jsonify({'error': 'UID parameter is required'}), 400
+        return jsonify({'error': 'Missing parameter: uid'}), 400
 
     if permanent:
-        expiration = 'permanent'
+        expiration_time = 'permanent'
+        try:
+            if jwt_token: 
+                requests.get(f"{ADD_API}?token={jwt_token}&id={uid}&key={key2}", timeout=5)
+        except:
+            pass
     else:
         if not time_value or not time_unit:
-            return jsonify({'error': 'Time parameters required for temporary UIDs'}), 400
-        
+            return jsonify({'error': 'Missing parameters: time or unit'}), 400
         try:
             time_value = int(time_value)
         except ValueError:
-            return jsonify({'error': 'Time value must be integer'}), 400
+            return jsonify({'error': 'Invalid time value. Must be an integer.'}), 400
 
-        delta_map = {
-            'seconds': timedelta(seconds=time_value),
-            'minutes': timedelta(minutes=time_value),
-            'hours': timedelta(hours=time_value),
-            'days': timedelta(days=time_value),
-            'months': timedelta(days=time_value*30),
-            'years': timedelta(days=time_value*365)
-        }
-        
-        if time_unit not in delta_map:
-            return jsonify({'error': 'Invalid time unit'}), 400
-        
-        expiration = (datetime.now() + delta_map[time_unit]).strftime('%Y-%m-%d %H:%M:%S')
-
-    # Add to external service
-    if token_manager.token:
+        current_time = datetime.now()
+        if time_unit == 'days':
+            expiration_time = current_time + timedelta(days=time_value)
+        elif time_unit == 'months':
+            expiration_time = current_time + timedelta(days=time_value * 30) 
+        elif time_unit == 'years':
+            expiration_time = current_time + timedelta(days=time_value * 365)
+        elif time_unit == 'seconds':
+            expiration_time = current_time + timedelta(seconds=time_value)
+        else:
+            return jsonify({'error': 'Invalid type. Use "days", "months", "years", or "seconds".'}), 400
+        expiration_time = expiration_time.strftime('%Y-%m-%d %H:%M:%S')
         try:
-            url = f"{CONFIG['ADD_API']}?token={token_manager.token}&id={uid}&key={CONFIG['ADMIN_KEY']}"
-            requests.get(url, timeout=5)
-        except Exception as e:
-            app.logger.error(f"[EXTERNAL] Add error: {str(e)}")
+            if jwt_token:
+                requests.get(f"{ADD_API}?token={jwt_token}&id={uid}&key={key2}", timeout=5)
+        except:
+            pass
 
-    # Save locally
-    uids = storage.load_uids()
-    uids[uid] = expiration
-    storage.save_uids(uids)
+    with storage_lock:
+        uids = load_uids()
+        uids[uid] = expiration_time
+        save_uids(uids)
 
     return jsonify({
         'uid': uid,
-        'status': 'added',
-        'expires_at': expiration if not permanent else 'never'
+        'expires_at': expiration_time if not permanent else 'never'
     })
 
+####################################
+# إزالة UID
 @app.route('/remove', methods=['GET'])
-@require_key
 def remove_uid():
     uid = request.args.get('uid')
     if not uid:
-        return jsonify({'error': 'UID parameter is required'}), 400
+        return jsonify({'error': 'Missing parameter: uid'}), 400
 
-    success = storage.remove_uid(uid, external=True)
-    
-    if success:
-        return jsonify({'status': 'removed', 'uid': uid})
-    return jsonify({'error': 'UID not found'}), 404
+    # حذف من API الخارجية
+    external_status = "No JWT token available"
+    if jwt_token:
+        try:
+            r = requests.get(f"{REMOVE_API}?token={jwt_token}&id={uid}&key={key2}", timeout=5)
+            external_status = r.text
+        except Exception as e:
+            external_status = f"External API error: {e}"
 
-@app.route('/get_time/<string:uid>', methods=['GET'])
-@require_key
-def check_time(uid):
-    uids = storage.load_uids()
-    
-    if uid not in uids:
-        return jsonify({'error': 'UID not found'}), 404
-    
-    expiration = uids[uid]
-    
-    if expiration == 'permanent':
-        return jsonify({
-            'uid': uid,
-            'status': 'permanent',
-            'message': 'This UID will never expire'
-        })
-    
-    expiration_time = datetime.strptime(expiration, '%Y-%m-%d %H:%M:%S')
-    remaining = expiration_time - datetime.now()
-    
-    if remaining.total_seconds() <= 0:
-        return jsonify({'error': 'UID has expired'}), 400
-    
+    # حذف من التخزين المحلي
+    with storage_lock:
+        uids = load_uids()
+        if uid in uids:
+            del uids[uid]
+            save_uids(uids)
+            local_status = f"UID {uid} removed locally."
+        else:
+            local_status = f"UID {uid} not found locally."
+
     return jsonify({
-        'uid': uid,
-        'expires_at': expiration,
-        'remaining': {
-            'days': remaining.days,
-            'hours': remaining.seconds // 3600,
-            'minutes': (remaining.seconds % 3600) // 60,
-            'seconds': remaining.seconds % 60
-        }
+        "uid": uid,
+        "local_status": local_status,
+        "external_status": external_status
     })
 
-# ============ Initialization ============
+####################################
+# معرفة الوقت المتبقي
+@app.route('/get_time/<string:uid>', methods=['GET'])
+def check_time(uid):
+    with storage_lock:
+        uids = load_uids()
+        if uid not in uids:
+            return jsonify({'error': 'UID not found'}), 404
+        expiration_time = uids[uid]        
+        if expiration_time == 'permanent':
+            return jsonify({           
+                'uid': uid,
+                'status': 'permanent',
+                'message': 'This UID will never expire.'
+            })
+        expiration_time = datetime.strptime(expiration_time, '%Y-%m-%d %H:%M:%S')
+        current_time = datetime.now()
+        if current_time > expiration_time:
+            return jsonify({'error': 'UID has expired'}), 400
+        remaining_time = expiration_time - current_time
+        days = remaining_time.days
+        hours, remainder = divmod(remaining_time.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return jsonify({
+            'uid': uid,
+            'remaining_time': {
+                'days': days,
+                'hours': hours,
+                'minutes': minutes,
+                'seconds': seconds
+            }
+        })
+
+####################################
 if __name__ == '__main__':
-    token_manager.start_token_refresh()
-    storage.start_cleanup()
-    
-    app.run(host='0.0.0.0', port=5000, debug=False)
-else:
-    # For WSGI deployment
-    token_manager.start_token_refresh()
-    storage.start_cleanup()
+    ensure_storage_file()
+    app.run(host='0.0.0.0', port=50022, debug=False)
